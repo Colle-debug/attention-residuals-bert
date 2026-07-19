@@ -12,8 +12,8 @@ PreNorm identity residual:
 
     h_l = h_{l-1} + f_{l-1}(LN(h_{l-1}))
 
-If ``use_attn_res=True``, every sublayer's residual is replaced by **Full
-Attention Residuals** exactly as described in "Attention Residuals"
+If ``use_attn_res=True``, every sublayer's residual is replaced by Full
+Attention Residuals exactly as described in "Attention Residuals"
 (Kimi Team, technical report, arXiv:2603.15031):
 
     phi(q, k)    = exp( q^T RMSNorm(k) )
@@ -21,10 +21,10 @@ Attention Residuals** exactly as described in "Attention Residuals"
     h_l          = sum_i alpha_{i->l} * v_i
 
 where the "value history" v_0, v_1, ..., v_{l-1} is the token embedding
-followed by the raw output of every preceding sublayer (attention or MLP),
-w_l is a single learned, zero-initialized pseudo-query vector *per sublayer*
+followed by the raw output of every preceding sublayer (attention or single-MLP/MoE),
+w_l is a single learned, zero-initialized pseudo-query vector per sublayer
 (decoupled from the forward activations), and the RMSNorm applied to the
-*keys* (not the values) is what we call ``DepthRMSNorm`` below: it prevents
+keys (not the values) is what we call ``DepthRMSNorm`` below: it prevents
 sublayers with naturally larger output magnitudes from dominating the
 depth-wise softmax purely due to scale.
 
@@ -48,14 +48,13 @@ import torch.nn.functional as F
 class BertConfig:
     """Architecture + toggle configuration. Defaults match BERT-Medium
     (Turc et al., 2019): hidden_size=512, num_hidden_layers=8, heads=8,
-    intermediate_size=2048 -- small enough to comfortably pre-train from
-    scratch on a single Colab T4 within a demo-scale budget."""
+    intermediate_size=2048"""
 
     vocab_size: int = 30522
     hidden_size: int = 512
     num_hidden_layers: int = 8
     num_attention_heads: int = 8
-    intermediate_size: int = 2048
+    intermediate_size: int = 2048 # 4x
     max_position_embeddings: int = 256
     hidden_dropout_prob: float = 0.1
     attention_dropout_prob: float = 0.1
@@ -175,8 +174,7 @@ class AttentionResidualMix(nn.Module):
 class MultiHeadSelfAttention(nn.Module):
     """Standard bidirectional multi-head self-attention (no causal mask --
     this is an encoder). Uses ``F.scaled_dot_product_attention`` for a
-    fused, memory-efficient kernel (Flash-Attention-style) so the library
-    stays fast enough for a Colab T4."""
+    fused kernel (Flash-Attention-style)."""
 
     def __init__(self, config: BertConfig):
         super().__init__()
@@ -191,6 +189,7 @@ class MultiHeadSelfAttention(nn.Module):
         self.q_proj = nn.Linear(config.hidden_size, config.hidden_size)
         self.k_proj = nn.Linear(config.hidden_size, config.hidden_size)
         self.v_proj = nn.Linear(config.hidden_size, config.hidden_size)
+        # Could self.qkv = nn.Linear(config.hidden_size, 3 * config.hidden_size) but future-proofing for GQA
         self.out_proj = nn.Linear(config.hidden_size, config.hidden_size)
 
     def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -321,7 +320,7 @@ class BertEmbeddings(nn.Module):
         super().__init__()
         self.word_embeddings = nn.Embedding(
             config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id
-        )
+        ) # padding_idx ensures the embedding for the pad token is always zeroed out (no backprop through it)
         self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.register_buffer(
@@ -336,7 +335,7 @@ class BertEmbeddings(nn.Module):
 
 
 class BertEncoder(nn.Module):
-    """The full PreNorm encoder stack: embeddings -> N Transformer layers ->
+    """The full encoder stack: embeddings -> N Transformer layers ->
     final LayerNorm, with an optional final AttnRes aggregation step.
 
     Note on the final aggregation: Figure 1(b) of the technical report shows
@@ -344,7 +343,7 @@ class BertEncoder(nn.Module):
     after the last sublayer, rather than just reading off the last
     sublayer's raw output. We replicate that here via ``self.output_mix``
     when ``use_attn_res=True``, so the model's final representation is
-    itself a *learned, selective* summary of the whole depth history, not
+    itself a learned, selective summary of the whole depth history, not
     just whatever the very last MLP happened to produce.
     """
 

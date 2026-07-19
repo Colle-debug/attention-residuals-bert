@@ -149,9 +149,9 @@ class MLMCollator:
     mlm_probability: float = 0.15
 
     def __call__(self, examples: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
-        # examples is a list of dicts of length batch_size, each dict has keys "input_ids" and "attention_mask", each a tensor of shape (max_seq_length,). We want to collate these into a single dict of tensors of shape (batch_size, max_seq_length).
+        # Examples is a list of dicts of length batch_size, each dict has keys "input_ids" and "attention_mask", each a tensor of shape (max_seq_length,). We want to collate these into a single dict of tensors of shape (batch_size, max_seq_length).
         input_ids = torch.stack([ex["input_ids"] for ex in examples])
-        attention_mask = torch.stack([ex["attention_mask"] for ex in examples])
+        attention_mask = torch.stack([ex["attention_mask"] for ex in examples]) # Size (batch_size, max_seq_length)
         input_ids, labels = self._mask_tokens(input_ids)
         return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
 
