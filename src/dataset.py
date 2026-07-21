@@ -92,7 +92,7 @@ def load_wikitext_mlm_dataset(
     fully into RAM) with columns ``input_ids`` and ``attention_mask``, each
     a fixed-length list of exactly ``max_seq_length`` tokens.
     """
-    raw = load_dataset("wikitext", dataset_config, split=split, cache_dir=cache_dir)
+    raw = load_dataset("Salesforce/wikitext", dataset_config, split=split, cache_dir=cache_dir)
 
     # wikitext-raw contains many blank lines and bare markdown headings
     # ("= = Title = ="); filtering these out avoids wasting packed blocks
