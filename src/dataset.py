@@ -141,7 +141,7 @@ class MLMCollator:
     is what makes the loss "masked" in the first place.
 
     Because masking is recomputed inside ``__call__`` (i.e. every time a
-    batch is collated, so every epoch), this is *dynamic* masking, as
+    batch is collated, so every epoch), this is dynamic masking, as
     opposed to computing one fixed mask per example ahead of time.
     """
 

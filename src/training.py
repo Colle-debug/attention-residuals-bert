@@ -5,13 +5,9 @@ src/training.py
 A lightweight, dependency-minimal MLM pre-training loop. Supports mixed
 precision (bf16 autocast on Ampere+ GPUs, fp16 autocast + ``GradScaler``
 everywhere else) and tracks running training / validation MLM loss and
-perplexity, designed to comfortably fit -- and run efficiently on -- a
-single Colab T4.
+perplexity. 
 
-Deliberately does *not* implement gradient accumulation, distributed
-training, or checkpoint resumption: those add real complexity for a
-benchmarking library whose whole point is a fast, legible baseline-vs-AttnRes
-comparison. Bolt them on externally if you need them for a bigger run.
+TO-DO: add gradient accumulation, distributed training, and checkpoint resumption
 """
 
 import math
@@ -34,14 +30,13 @@ class TrainerConfig:
     log_every: int = 50
     eval_every: int = 500
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
-    mixed_precision: str = "fp16"  # one of {"fp16", "bf16", "no"}
+    mixed_precision: str = "fp16" # one of {"fp16", "bf16", "no"}
     output_dir: str = "./checkpoints"
 
 
 def _resolve_amp_dtype(mixed_precision: str, device: str):
     """Returns (autocast_dtype, use_grad_scaler). GradScaler is only needed
-    for fp16 (bf16 has enough dynamic range that scaling is unnecessary,
-    and fp32 has no under/overflow risk to begin with)."""
+    for fp16 (bf16 has enough dynamic range, and fp32 has no under/overflow risk to begin with)."""
     if device != "cuda" or mixed_precision == "no":
         return torch.float32, False
     if mixed_precision == "bf16":
@@ -49,7 +44,7 @@ def _resolve_amp_dtype(mixed_precision: str, device: str):
             print("[training] bf16 requested but not supported on this GPU -- falling back to fp16.")
         else:
             return torch.bfloat16, False
-    return torch.float16, True  # default: fp16 (T4-friendly, needs GradScaler)
+    return torch.float16, True  # default: fp16 (needs GradScaler)
 
 
 def build_optimizer(model: nn.Module, lr: float, weight_decay: float) -> torch.optim.Optimizer:
@@ -102,6 +97,7 @@ def evaluate(model: nn.Module, val_loader: DataLoader, device: str, amp_dtype: t
     total_loss, total_tokens = 0.0, 0
 
     for batch in val_loader:
+        # batch is a dict of inputs_ids, attention_mask, labels, all of shape [B, T]. Move to device.
         batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
         with torch.autocast(device_type="cuda" if device == "cuda" else "cpu",
                              dtype=amp_dtype, enabled=(amp_dtype != torch.float32)):
@@ -125,7 +121,7 @@ def train(
     run_name: str = "run",
 ) -> Dict[str, List[float]]:
     """Main training loop.
-
+ 
     Returns a ``history`` dict of logged metrics over time (steps, running
     train loss/perplexity, learning rate, and periodic val loss/perplexity)
     -- handy for plotting the AttnRes vs. baseline curves against each
@@ -134,36 +130,38 @@ def train(
     device = config.device
     model.to(device)
     model.train()
-
+ 
     optimizer = build_optimizer(model, config.lr, config.weight_decay)
     num_training_steps = config.epochs * len(train_loader)
     scheduler = build_scheduler(optimizer, num_training_steps, config.warmup_ratio)
-
+ 
     amp_dtype, use_scaler = _resolve_amp_dtype(config.mixed_precision, device)
     scaler = torch.cuda.amp.GradScaler(enabled=use_scaler)
-
+ 
     history: Dict[str, List[float]] = {
-        "step": [], "train_loss": [], "train_ppl": [], "lr": [],
+        "step": [], "train_loss": [], "train_ppl": [], "lr": [], "tokens_per_sec": [],
         "val_step": [], "val_loss": [], "val_ppl": [],
     }
-
+ 
     running_loss, running_tokens = 0.0, 0
     global_step = 0
     start_time = time.time()
-
+    last_log_time, last_log_tokens_seen = start_time, 0
+    total_tokens_seen = 0
+ 
     print(f"[{run_name}] device={device} amp_dtype={amp_dtype} steps/epoch={len(train_loader)} "
           f"total_steps={num_training_steps}")
-
+ 
     for epoch in range(config.epochs):
         for batch in train_loader:
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
-
+ 
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type="cuda" if device == "cuda" else "cpu",
                                  dtype=amp_dtype, enabled=(amp_dtype != torch.float32)):
                 out = model(**batch)
                 loss = out["loss"]
-
+ 
             if use_scaler:
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)  # required before clipping under GradScaler
@@ -175,27 +173,37 @@ def train(
                 torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm)
                 optimizer.step()
             scheduler.step()
-
+ 
             n_tokens = max(int((batch["labels"] != -100).sum().item()), 1)
             running_loss += loss.item() * n_tokens
             running_tokens += n_tokens
+            total_tokens_seen += batch["input_ids"].numel()  # ALL tokens processed, not just masked ones
             global_step += 1
-
+ 
             if global_step % config.log_every == 0:
                 avg_loss = running_loss / running_tokens
                 elapsed = time.time() - start_time
+                now = time.time()
+                # Tokens/sec is a fairer per-step cost signal than "epochs" alone:
+                # AttnRes does strictly more FLOPs per step (see
+                # modeling.estimate_forward_flops), so a lower tokens/sec here at
+                # matched epoch count is the expected, honest cost of that extra
+                # compute -- not a bug to chase away.
+                tokens_per_sec = (total_tokens_seen - last_log_tokens_seen) / max(now - last_log_time, 1e-6)
+                last_log_time, last_log_tokens_seen = now, total_tokens_seen
                 current_lr = scheduler.get_last_lr()[0]
                 print(
                     f"[{run_name}] epoch {epoch} step {global_step}/{num_training_steps} "
                     f"| loss {avg_loss:.4f} | ppl {_perplexity(avg_loss):.2f} "
-                    f"| lr {current_lr:.2e} | {elapsed:.1f}s elapsed"
+                    f"| lr {current_lr:.2e} | {tokens_per_sec:.0f} tok/s | {elapsed:.1f}s elapsed"
                 )
                 history["step"].append(global_step)
                 history["train_loss"].append(avg_loss)
                 history["train_ppl"].append(_perplexity(avg_loss))
                 history["lr"].append(current_lr)
+                history["tokens_per_sec"].append(tokens_per_sec)
                 running_loss, running_tokens = 0.0, 0
-
+ 
             if global_step % config.eval_every == 0:
                 metrics = evaluate(model, val_loader, device, amp_dtype)
                 print(f"[{run_name}]   >> val_loss {metrics['val_loss']:.4f} "
@@ -203,7 +211,7 @@ def train(
                 history["val_step"].append(global_step)
                 history["val_loss"].append(metrics["val_loss"])
                 history["val_ppl"].append(metrics["val_perplexity"])
-
+ 
     # Final full validation pass at the very end of training.
     final_metrics = evaluate(model, val_loader, device, amp_dtype)
     print(f"[{run_name}] FINAL >> val_loss {final_metrics['val_loss']:.4f} "
@@ -211,5 +219,13 @@ def train(
     history["val_step"].append(global_step)
     history["val_loss"].append(final_metrics["val_loss"])
     history["val_ppl"].append(final_metrics["val_perplexity"])
-
+ 
+    # Scalar wall-clock summary (not a per-step list like the rest of
+    # `history`) -- this is what makes it possible to compare runs on a
+    # compute/time basis, not just "same number of epochs".
+    total_wall_clock_sec = time.time() - start_time
+    history["total_wall_clock_sec"] = total_wall_clock_sec
+    history["avg_tokens_per_sec"] = total_tokens_seen / max(total_wall_clock_sec, 1e-6)
+ 
     return history
+ 

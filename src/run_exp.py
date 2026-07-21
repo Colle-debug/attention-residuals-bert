@@ -26,7 +26,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from src.modeling import BertConfig, BertForMaskedLM
+from src.modeling import BertConfig, BertForMaskedLM, estimate_forward_flops
 from src.dataset import get_dataloaders
 from src.training import TrainerConfig, train
 
@@ -136,15 +136,37 @@ def main() -> None:
     print(f"=== [{run_name}] Training ({args.epochs} epochs, batch_size={args.batch_size}, lr={args.lr}) ===")
     history = train(model, loaders["train"], loaders["val"], trainer_config, run_name=run_name)
 
+    # Matching epoch count between variants matches tokens seen, but NOT
+    # compute or wall-clock: AttnRes does strictly more FLOPs/step than the
+    # baseline (its depth-wise softmax mixes). This report makes that
+    # asymmetry explicit rather than letting "3 epochs vs 3 epochs" quietly
+    # imply "equal compute".
+    flops_per_step = estimate_forward_flops(model_config, args.batch_size, args.max_seq_length)
+    fairness_report = {
+        "model_variant": args.model_variant,
+        "num_parameters": model.num_parameters,
+        "est_forward_flops_per_step": flops_per_step,
+        "epochs": args.epochs,
+        "tokens_per_step": args.batch_size * args.max_seq_length,
+        "avg_tokens_per_sec": history.get("avg_tokens_per_sec"),
+        "total_wall_clock_sec": history.get("total_wall_clock_sec"),
+    }
+    print(f"=== [{run_name}] Fairness report (compare against the other variant's) ===")
+    for k, v in fairness_report.items():
+        print(f"    {k}: {v}")
+ 
     # --- persist run artifacts -------------------------------------------------
     with open(output_dir / "config.json", "w") as f:
         json.dump(vars(args), f, indent=2)
     with open(output_dir / "history.json", "w") as f:
         json.dump(history, f, indent=2)
+    with open(output_dir / "fairness_report.json", "w") as f:
+        json.dump(fairness_report, f, indent=2)
     torch.save(model.state_dict(), output_dir / "model.pt")
-
+ 
     print(f"=== [{run_name}] Done. Artifacts saved to {output_dir} ===")
-
-
+ 
+ 
 if __name__ == "__main__":
     main()
+ 

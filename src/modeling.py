@@ -2,7 +2,7 @@
 src/modeling.py
 ================
 
-From-scratch PyTorch implementation of a PreNorm, BERT-Medium-sized encoder
+From-scratch PyTorch implementation of a BERT-Medium-sized encoder
 (hidden=512, layers=8, heads=8, ffn=2048), with a single architectural toggle:
 
     BertConfig(use_attn_res: bool)
@@ -75,15 +75,16 @@ class DepthRMSNorm(nn.Module):
 
     Given a tensor of shape ``[N, B, T, D]`` -- N candidate value vectors
     (one per depth/history entry) for every (batch, token) position -- this
-    module RMS-normalizes each of the N vectors *independently* over D. This
-    is exactly the "RMSNorm on keys" ablated in the Attention Residuals
+    module RMS-normalizes each of the N vectors independently over D. 
+    
+    This is exactly the "RMSNorm on keys" ablated in the Attention Residuals
     technical report: without it, sublayers whose outputs happen to have
     larger norm would dominate the depth-wise softmax purely due to scale,
     rather than the content actually being more relevant to the current
     query. The report finds removing it measurably hurts loss for both Full
     and Block AttnRes (Table 4).
 
-    Deliberately has **no learnable gain**: a learned per-channel scale would
+    Deliberately has no learnable gain: a learned per-channel scale would
     reintroduce a magnitude-dominance channel this normalization exists to
     remove, and the technical report's formulation ``exp(q^T RMSNorm(k))``
     uses a bare (gain-free) RMSNorm on the keys.
@@ -104,7 +105,7 @@ class AttentionResidualMix(nn.Module):
     """Full Attention Residuals (Kimi Team).
 
     Replaces the fixed, unit-weight additive accumulation of a standard
-    residual stream with depth-wise **softmax attention** over the entire
+    residual stream with depth-wise softmax attention over the entire
     history of previous "value" vectors:
 
         v_0 = token embedding
@@ -114,17 +115,17 @@ class AttentionResidualMix(nn.Module):
         h_l          = sum_i alpha_{i->l} * v_i
 
     ``w_l`` (this module's ``self.w``) is a single learned pseudo-query
-    vector per sublayer. Crucially it does **not** depend on the current
+    vector per sublayer. Crucially it does not depend on the current
     hidden state or token content -- it is a free parameter, decoupled from
     the forward computation, which is what allows (in the original paper) a
     whole block's queries to be batched together for efficient inference.
 
-    Zero-initialization of ``w`` is not a minor detail but a *requirement*
+    Zero-initialization of ``w`` is not a minor detail but a requirement
     from the paper: at ``w = 0``, every ``phi(w, k) = exp(0) = 1``, so
     ``alpha_{i->l}`` is uniform over all history entries and Full AttnRes
     starts out as a plain running average -- close to (though not identical
     to, due to the 1/N vs. 1 scaling) the additive baseline. This keeps
-    training stable at initialization and lets the model *learn* to deviate
+    training stable at initialization and lets the model learn to deviate
     from uniform averaging as training progresses, rather than starting from
     an arbitrary, possibly destabilizing, mixture.
     """
@@ -151,19 +152,19 @@ class AttentionResidualMix(nn.Module):
         # [N, B, T, D]. This stacking is the O(L*d) memory the paper
         # discusses; in vanilla (non-pipelined, non-recomputed) training it
         # overlaps entirely with activations already retained for backprop,
-        # so it adds no *additional* memory over a normal residual stream.
-        values = torch.stack(history, dim=0)
-        keys = self.key_norm(values)  # RMSNorm(v_i), applied per-i
+        # so it adds no additional memory over a normal residual stream.
+        values = torch.stack(history, dim=0) # [N, B, T, D]
+        keys = self.key_norm(values) # RMSNorm(v_i), applied per-i
 
         # phi(w_l, v_i) = exp(w_l . RMSNorm(v_i))  -- computed here in log
         # space as raw dot-product logits; the exp() + normalization is
         # folded into softmax() below for numerical stability.
-        logits = torch.einsum("d,nbtd->nbt", self.w, keys)          # [N, B, T]
-        alpha = torch.softmax(logits, dim=0)                        # softmax over depth (N)
+        logits = torch.einsum("d,nbtd->nbt", self.w, keys) # [N, B, T]
+        alpha = torch.softmax(logits, dim=0) # softmax over depth (N) [N, B, T]
 
         # h_l = sum_i alpha_{i->l} * v_i  -- weighted combination of the RAW
         # (un-normalized) values, not the normalized keys.
-        mixed = torch.einsum("nbt,nbtd->btd", alpha, values)
+        mixed = torch.einsum("nbt,nbtd->btd", alpha, values) # [B, T, D]
         return mixed
 
 
@@ -237,7 +238,7 @@ class TransformerLayer(nn.Module):
         h = h + Dropout( MLP ( LN(h) ) )
 
     AttnRes (``use_attn_res=True``): each entry point is replaced by a
-    depth-wise softmax mix over the *entire* running history of previous
+    depth-wise softmax mix over the entire running history of previous
     sublayer outputs (see ``AttentionResidualMix``), and every sublayer's
     raw output is appended to that history for subsequent layers to
     (selectively) attend back to:
@@ -416,7 +417,7 @@ class BertForMaskedLM(nn.Module):
     def _init_weights(self, module: nn.Module):
         """BERT-style initialization (N(0, 0.02^2) for weights, zeros for
         biases, ones/zeros for LayerNorm). Note this intentionally does
-        *not* touch ``AttentionResidualMix.w``: that parameter's required
+        not touch ``AttentionResidualMix.w``: that parameter's required
         zero-init is set explicitly in its own ``__init__`` and must remain
         untouched by any generic re-initialization pass."""
         if isinstance(module, nn.Linear):
@@ -471,3 +472,42 @@ def get_bert_medium_config(vocab_size: int, use_attn_res: bool, max_seq_length: 
         max_position_embeddings=max_seq_length,
         use_attn_res=use_attn_res,
     )
+
+# --------------------------------------------------------------------------- #
+# FLOPs estimation (for fair baseline-vs-AttnRes reporting)
+# --------------------------------------------------------------------------- #
+ 
+def estimate_forward_flops(config: BertConfig, batch_size: int, seq_len: int) -> int:
+    """Estimate of forward-pass FLOPs for one training step -- intended 
+    purely as a relative baseline-vs-AttnRes comparison (see the "is fixed-epoch training fair?" discussion), not a precise hardware FLOP count. Uses the standard "2 FLOPs per MAC"
+    transformer accounting (Kaplan et al., 2020).
+ 
+    The extra parameter count AttnRes adds (one d-dim vector per sublayer) is
+    negligible (~0.02% at BERT-Medium scale) and is NOT the fairness concern;
+    the actual asymmetry is that AttnRes does strictly more compute per
+    step than the baseline, via the depth-wise softmax mixes below. This
+    function makes that delta explicit and reportable.
+    """
+    d, d_ff, L, T, B = config.hidden_size, config.intermediate_size, config.num_hidden_layers, seq_len, batch_size
+ 
+    # Per-token, per-layer cost shared identically by BOTH variants -- this
+    # part should NOT differ between baseline and attn_res runs.
+    qkvo_flops = 2 * 4 * d * d          # Q, K, V, O projections
+    attn_score_flops = 2 * 2 * d * T    # QK^T and softmax(QK^T)@V, per token
+    mlp_flops = 2 * 2 * d * d_ff        # two linear layers
+    base_flops = B * T * L * (qkvo_flops + attn_score_flops + mlp_flops)
+ 
+    attn_res_flops = 0
+    if config.use_attn_res:
+        # 2*L sublayer mixes + 1 final output mix, each attending over a
+        # history that grows by one entry per sublayer (1, 2, 3, ..., 2L+1).
+        # Each history entry costs ~3 O(d) ops (RMSNorm, dot with w,
+        # weighted-sum contribution) -- this O(L^2 * d) term is exactly the
+        # overhead the technical report attributes to Full AttnRes.
+        num_mixes = 2 * L + 1
+        avg_history_len = (num_mixes + 1) / 2
+        flops_per_history_entry = 2 * 3 * d
+        attn_res_flops = int(B * T * num_mixes * avg_history_len * flops_per_history_entry)
+ 
+    return int(base_flops) + attn_res_flops
+ 
