@@ -36,13 +36,27 @@ from transformers import AutoTokenizer, PreTrainedTokenizerFast
 # --------------------------------------------------------------------------- #
 
 def build_tokenizer(tokenizer_name: str = "bert-base-uncased") -> PreTrainedTokenizerFast:
-    """Loads a Rust (``tokenizers``-backed) fast WordPiece tokenizer.
+    """
+    We only reuse the vocabulary / subword rules here for convenience and
+    reproducibility -- this is purely a text-preprocessing utility, not a
+    pretrained model; ``modeling.py`` never loads pretrained weights.
     """
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, use_fast=True)
     if tokenizer.mask_token_id is None:
-        raise ValueError(f"Tokenizer '{tokenizer_name}' has no [MASK] token; MLM requires one.") # Check potential improvement here. In principle, we could add a [MASK] token to the tokenizer if it doesn't have one, but that would require adjusting the model's embedding layer as well. For now, we just raise an error.
+        raise ValueError(f"Tokenizer '{tokenizer_name}' has no [MASK] token; MLM requires one.")
+ 
+    # We deliberately tokenize whole WikiText articles WITHOUT truncation in
+    # `_tokenize_batch` (no `max_length=` / `truncation=True`) -- the actual
+    # `max_seq_length` constraint is enforced afterward by `_group_texts`,
+    # which concatenates and re-chunks everything into fixed-length blocks.
+    # `tokenizer_name`'s pretrained `model_max_length` (e.g. 512 for
+    # bert-base-uncased) is therefore irrelevant to us, but transformers
+    # still warns "sequence length is longer than the specified maximum"
+    # whenever an article exceeds it. That warning is a false positive in
+    # this pipeline -- suppress it here rather than at every call site.
+    tokenizer.deprecation_warnings["sequence-length-is-longer-than-the-specified-maximum"] = True
+ 
     return tokenizer
-
 
 # --------------------------------------------------------------------------- #
 # Tokenization + packing ("group_texts")
@@ -200,18 +214,30 @@ def get_dataloaders(
     num_proc: int = 4,
     num_workers: int = 2,
     mlm_probability: float = 0.15,
+    cache_dir: Optional[str] = None,
 ) -> Dict[str, object]:
     """One-shot builder: returns train/validation DataLoaders plus the
     tokenizer (needed downstream to size the model's vocabulary and to
-    resolve special-token ids)."""
+    resolve special-token ids).
+
+    ``cache_dir``: where ``datasets`` stores the raw download AND the
+    tokenized/packed ``.map()`` results (keyed by a content fingerprint, so
+    identical calls are cache hits). Left as ``None``, this defaults to the
+    usual ``~/.cache/huggingface/datasets`` -- fine on a persistent machine,
+    but on Colab that directory lives on the VM's ephemeral disk and is
+    wiped on every runtime reset, so a CPU-only Colab session re-tokenizes
+    from scratch every time. Point this at a mounted Google Drive path
+    (e.g. ``/content/drive/MyDrive/hf_cache``) to pay the tokenization cost
+    once and hit the cache on every subsequent session.
+    """
 
     tokenizer = build_tokenizer(tokenizer_name)
 
     train_ds = load_wikitext_mlm_dataset(
-        tokenizer, split="train", max_seq_length=max_seq_length, num_proc=num_proc
+        tokenizer, split="train", max_seq_length=max_seq_length, num_proc=num_proc, cache_dir=cache_dir
     )
     val_ds = load_wikitext_mlm_dataset(
-        tokenizer, split="validation", max_seq_length=max_seq_length, num_proc=num_proc
+        tokenizer, split="validation", max_seq_length=max_seq_length, num_proc=num_proc, cache_dir=cache_dir
     )
 
     collator = MLMCollator(tokenizer=tokenizer, mlm_probability=mlm_probability)
@@ -225,6 +251,7 @@ def get_dataloaders(
         pin_memory=True,
         drop_last=True,
     )
+
     val_loader = DataLoader(
         val_ds,
         batch_size=batch_size,

@@ -20,6 +20,7 @@ against each other afterward.
 
 import argparse
 import json
+import os
 import random
 from pathlib import Path
 
@@ -67,6 +68,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num_proc", type=int, default=4, help="CPU workers for datasets.map tokenization/packing.")
     parser.add_argument("--num_workers", type=int, default=2, help="DataLoader worker processes.")
     parser.add_argument("--mlm_probability", type=float, default=0.15)
+    parser.add_argument("--cache_dir", type=str, default=None,
+                        help="Where `datasets` caches the raw download AND tokenized/packed results. On Colab, "
+                            "point this at a mounted Google Drive path (e.g. /content/drive/MyDrive/hf_cache) "
+                            "so tokenization is only ever paid for once, not re-run every fresh runtime.")
 
     # --- Optimization -------------------------------------------------------
     parser.add_argument("--epochs", type=int, default=3)
@@ -95,12 +100,21 @@ def main() -> None:
     output_dir = Path(args.output_dir) / run_name
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"=== [{run_name}] Building dataloaders (WikiText-103-raw-v1, seq_len={args.max_seq_length}) ===")
+    num_proc = args.num_proc if args.num_proc is not None else min(4, os.cpu_count() or 1)
+ 
+    if args.cache_dir is not None:
+        print(f"=== [{run_name}] Using dataset cache_dir={args.cache_dir} "
+              f"(point this at a mounted Drive path on Colab to persist across sessions) ===")
+ 
+    print(f"=== [{run_name}] Building dataloaders (WikiText-103-raw-v1, seq_len={args.max_seq_length}, "
+          f"num_proc={num_proc}) ===")
+
     loaders = get_dataloaders(
         tokenizer_name=args.tokenizer_name,
         max_seq_length=args.max_seq_length,
         batch_size=args.batch_size,
-        num_proc=args.num_proc,
+        num_proc=num_proc,
+        cache_dir=args.cache_dir,
         num_workers=args.num_workers,
         mlm_probability=args.mlm_probability,
     )
