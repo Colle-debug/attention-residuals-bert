@@ -39,12 +39,12 @@ attn-res-bert/
     └── training.py    # mixed-precision training loop, optimizer/scheduler, eval
 ```
 
-## Quickstart (Google Colab)
+## Quickstart
 
 ```bash
 !git clone <this-repo-url>
 %cd attn-res-bert
-!pip install -q -r requirements.txt
+!pip install -q uv && uv pip install --system -e .
 
 # Baseline: standard PreNorm identity residuals
 !python run_exp.py --model_variant baseline --epochs 3 --batch_size 32 --lr 3e-4
@@ -53,9 +53,14 @@ attn-res-bert/
 !python run_exp.py --model_variant attn_res --epochs 3 --batch_size 32 --lr 3e-4
 ```
 
-Each run writes `checkpoints/<run_name>/{config.json, history.json, model.pt}`,
-so `history.json` from both runs can be loaded side-by-side to plot loss /
-perplexity curves.
+Each run writes `checkpoints/<run_name>/{config.json, history.json, fairness_report.json, model.pt}`,
+so both runs' `history.json` / `fairness_report.json` can be loaded side-by-side to plot loss /
+perplexity curves and compare compute cost.
+
+**Local development**: install [uv](https://docs.astral.sh/uv/), then
+`uv sync` to create a `.venv` and install everything from `pyproject.toml` /
+`uv.lock`, and `uv run python run_exp.py ...` to run without manually
+activating the venv.
 
 ## Results
  
