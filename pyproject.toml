@@ -1,7 +1,7 @@
 [project]
 name = "attn-res-bert"
 version = "0.1.0"
-description = "Add your description here"
+description = "A from-scratch PyTorch benchmark comparing Attention Residuals (Kimi Team) against a standard PreNorm residual baseline, inside an 8-layer BERT-Medium encoder trained on masked language modeling over WikiText-103"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
